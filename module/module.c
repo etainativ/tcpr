@@ -69,13 +69,29 @@ static struct connection *lookup_external(uint32_t peer_address,
 {
 	struct connection *c;
 
+	if (net_ratelimit())
+		printk(KERN_DEBUG "searching for: %pI4:%u <-- %u\n",
+			&address,
+			port, peer_port);
+
 	list_for_each_entry(c, &connections, list)
-		if (c->state.peer_address == peer_address
+	{
+		if (net_ratelimit())
+			printk(KERN_DEBUG "db peer: %pI4:%u, db address: %pI4:%u, net_ns: %p/%p",
+				&c->state.peer_address,
+				c->state.tcpr.hard.peer.port,
+				&c->address,
+				c->state.tcpr.hard.port,
+				c->net_ns,
+				net_ns);
+
+				if (c->state.peer_address == peer_address
 		    && c->state.tcpr.hard.peer.port == peer_port
 		    && c->address == address
 		    && c->state.tcpr.hard.port == port
 		    && c->net_ns == net_ns)
 			return c;
+	}
 	return NULL;
 }
 
@@ -305,9 +321,15 @@ static unsigned int tcpr_tg_application(struct sk_buff *skb, uint32_t address, s
 	enum tcpr_verdict tcpr_verdict;
 	unsigned int verdict = NF_DROP;
 
+	if (net_ratelimit())
+		printk(KERN_DEBUG "Entering tg_application\n");
 	ip = ip_hdr(skb);
 	if (ip->protocol != IPPROTO_TCP)
+	{
+		if (net_ratelimit())
+			printk(KERN_DEBUG "Got UDP packet\n");
 		return tcpr_tg_update(skb, address, net_ns);
+	}
 	tcp = (struct tcphdr *)((uint32_t *)ip + ip->ihl);
 
 	read_lock(&connections_lock);
@@ -354,6 +376,9 @@ static unsigned int tcpr_tg_peer(struct sk_buff *skb, struct net *net_ns)
 	struct connection *p;
 	enum tcpr_verdict tcpr_verdict;
 	unsigned int verdict = NF_DROP;
+
+	if (net_ratelimit())
+		printk(KERN_DEBUG "Entering tg_peer\n");
 
 	ip = ip_hdr(skb);
 	if (ip->protocol != IPPROTO_TCP)
@@ -411,12 +436,19 @@ static unsigned int tcpr_tg(struct sk_buff *skb,
 			    const struct xt_action_param *par)
 {
 	const uint32_t *address = par->targinfo;
+	unsigned int res;
 	struct net *net_ns = dev_net(par->in ? par->in : par->out);
 
+	if (net_ratelimit())
+		printk(KERN_DEBUG "targinfo: %pI4\n", par->targinfo);
 	if (!skb_make_writable(skb, skb->len))
 		return NF_DROP;
 	if (*address)
-		return tcpr_tg_application(skb, *address, net_ns);
+	{
+		res = tcpr_tg_application(skb, *address, net_ns);
+		printk(KERN_DEBUG "tcpr application result: %i\n", res);
+		return res;
+	}
 	else
 		return tcpr_tg_peer(skb, net_ns);
 }
