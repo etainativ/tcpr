@@ -128,7 +128,7 @@ static void connection_done(struct connection *c)
 	kfree(c);
 }
 
-static void inject_ip(struct iphdr *ip, struct sk_buff *oldskb)
+static void inject_ip(struct iphdr *ip, struct sk_buff *oldskb, struct net *net_ns)
 {
 	struct sk_buff *skb;
 
@@ -139,18 +139,23 @@ static void inject_ip(struct iphdr *ip, struct sk_buff *oldskb)
 		return;
 	}
 	
+
 	skb_reserve(skb, LL_MAX_HEADER);
 	skb_reset_network_header(skb);
 	skb_put(skb, ntohs(ip->tot_len));
 	memcpy(skb->data, ip, ntohs(ip->tot_len));
 	skb->ip_summed = CHECKSUM_NONE;
 	skb_dst_set(skb, dst_clone(skb_dst(oldskb)));
-	if (ip_route_me_harder(skb, RTN_UNSPEC) < 0) {
+
+
+	if (ip_route_me_harder(net_ns, skb, RTN_UNSPEC) < 0) {
 		if (net_ratelimit())
 			printk(KERN_WARNING "TCPR cannot route\n");
 		kfree_skb(skb);
 		return;
 	}
+
+
 	if (skb->len > dst_mtu(skb_dst(skb))) {
 		if (net_ratelimit())
 			printk(KERN_WARNING "TCPR generated packet that would fragment\n");
@@ -158,10 +163,10 @@ static void inject_ip(struct iphdr *ip, struct sk_buff *oldskb)
 		return;
 	}
 
-	ip_local_out(skb);
+	ip_local_out(net_ns, skb->sk, skb);
 }
 
-static void inject_tcp(struct connection *c, enum tcpr_verdict tcpr_verdict, struct sk_buff *oldskb)
+static void inject_tcp(struct connection *c, enum tcpr_verdict tcpr_verdict, struct sk_buff *oldskb, struct net *net_ns)
 {
 	struct {
 		struct iphdr ip;
@@ -206,10 +211,10 @@ static void inject_tcp(struct connection *c, enum tcpr_verdict tcpr_verdict, str
 							  packet.tcp.doff * 4,
 							  0));
 
-	inject_ip(&packet.ip, oldskb);
+	inject_ip(&packet.ip, oldskb, net_ns);
 }
 
-static void inject_update(struct iphdr *ip, struct udphdr *udp, struct tcpr_ip4 *state, struct sk_buff *oldskb)
+static void inject_update(struct iphdr *ip, struct udphdr *udp, struct tcpr_ip4 *state, struct sk_buff *oldskb, struct net *net_ns)
 {
 	struct {
 		struct iphdr ip;
@@ -230,7 +235,7 @@ static void inject_update(struct iphdr *ip, struct udphdr *udp, struct tcpr_ip4 
 	packet.udp.dest = udp->source;
 	packet.udp.len = htons(sizeof(packet.udp) + sizeof(packet.state));
 	memcpy(&packet.state, state, sizeof(packet.state));
-	inject_ip(&packet.ip, oldskb);
+	inject_ip(&packet.ip, oldskb, net_ns);
 }
 
 static unsigned int tcpr_tg_update(struct sk_buff *skb, uint32_t address, struct net *net_ns)
@@ -253,7 +258,7 @@ static unsigned int tcpr_tg_update(struct sk_buff *skb, uint32_t address, struct
 	read_unlock(&connections_lock);
 	if (!c) {
 		if (!update->tcpr.port) {
-			inject_update(ip, udp, update, skb);
+			inject_update(ip, udp, update, skb, net_ns);
 			return NF_DROP;
 		}
 		if (net_ratelimit())
@@ -280,13 +285,13 @@ static unsigned int tcpr_tg_update(struct sk_buff *skb, uint32_t address, struct
 	if (c->state.peer_address && c->state.tcpr.hard.peer.port) {
 		tcpr_verdict = tcpr_update(&c->state.tcpr, &update->tcpr);
 		if (tcpr_verdict == TCPR_DELIVER)
-			inject_update(ip, udp, update, skb);
+			inject_update(ip, udp, update, skb, net_ns);
 		else if (tcpr_verdict != TCPR_DROP)
-			inject_tcp(c, tcpr_verdict, skb);
+			inject_tcp(c, tcpr_verdict, skb, net_ns);
 		if (c->state.tcpr.done)
 			connection_done(c);
 	} else {
-		inject_update(ip, udp, update, skb);
+		inject_update(ip, udp, update, skb, net_ns);
 	}
 	spin_unlock(&c->tcpr_lock); /* XXX race if connection done */
 	return NF_DROP;
@@ -330,7 +335,7 @@ static unsigned int tcpr_tg_application(struct sk_buff *skb, uint32_t address, s
 		ip->saddr = c->address;
 		verdict = NF_ACCEPT;
 	} else if (tcpr_verdict != TCPR_DROP) {
-		inject_tcp(c, tcpr_verdict, skb);
+		inject_tcp(c, tcpr_verdict, skb, net_ns);
 	}
 	if (c->state.tcpr.done) {
 		if (net_ratelimit())
@@ -389,9 +394,9 @@ static unsigned int tcpr_tg_peer(struct sk_buff *skb, struct net *net_ns)
 	if (tcpr_verdict == TCPR_DELIVER) {
 		fix_checksums(ip, tcp, ip->daddr, c->state.address);
 		ip->daddr = c->state.address;
-		inject_ip(ip, skb);
+		inject_ip(ip, skb, net_ns);
 	} else if (tcpr_verdict != TCPR_DROP) {
-		inject_tcp(c, tcpr_verdict, skb);
+		inject_tcp(c, tcpr_verdict, skb, net_ns);
 	}
 	if (c->state.tcpr.done) {
 		if (net_ratelimit())
