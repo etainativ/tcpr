@@ -421,11 +421,20 @@ static unsigned int tcpr_tg(struct sk_buff *skb,
 		return tcpr_tg_peer(skb, net_ns);
 }
 
+static int tcpr_check_entry(const struct xt_tgchk_param *par)
+{
+	uint32_t *tmp = par->targinfo;
+	printk(KERN_INFO "New rule: %s, entryinfo: %p, targetinfo: %p\n", par->table, par->entryinfo, par->targinfo);
+	printk(KERN_INFO "targetinfo: %pI4", tmp);
+	return 0;
+}
+
 static struct xt_target tcpr_tg_reg = {
 	.name = "TCPR",
 	.family = AF_INET,
 	.target = tcpr_tg,
 	.targetsize = sizeof(uint32_t),
+	.checkentry = tcpr_check_entry,
 	.me = THIS_MODULE,
 };
 
