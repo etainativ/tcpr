@@ -12,6 +12,12 @@
 #include <tcpr/types.h>
 #include <tcpr/filter.h>
 
+
+enum direction {
+	INPUT,
+	OUTPUT
+};
+
 struct connection {
 	struct list_head list;
 	struct tcpr_ip4 state;
@@ -144,7 +150,11 @@ static void connection_done(struct connection *c)
 	kfree(c);
 }
 
-static void inject_ip(struct iphdr *ip, struct sk_buff *oldskb, struct net *net_ns)
+static void inject_ip(
+		struct iphdr *ip,
+		struct sk_buff *oldskb,
+		struct net *net_ns,
+		enum direction direction)
 {
 	struct sk_buff *skb;
 
@@ -179,11 +189,21 @@ static void inject_ip(struct iphdr *ip, struct sk_buff *oldskb, struct net *net_
 		return;
 	}
 
-	ip_local_out(net_ns, skb->sk, skb);
+	if (direction == INPUT)
+		ip_output(net_ns, skb->sk, skb);
+
+	else
+		ip_local_deliver(skb);
 }
 
-static void inject_tcp(struct connection *c, enum tcpr_verdict tcpr_verdict, struct sk_buff *oldskb, struct net *net_ns)
+static void inject_tcp(
+		struct connection *c,
+		enum tcpr_verdict tcpr_verdict,
+		struct sk_buff *oldskb,
+		struct net *net_ns)
 {
+
+	enum direction direction = INPUT;
 	struct {
 		struct iphdr ip;
 		struct tcphdr tcp;
@@ -217,6 +237,7 @@ static void inject_tcp(struct connection *c, enum tcpr_verdict tcpr_verdict, str
 		tcpr_acknowledge(&packet.tcp, &c->state.tcpr);
 		packet.ip.saddr = c->address;
 		packet.ip.daddr = c->state.peer_address;
+		direction = OUTPUT;
 	}
 
 	packet.ip.tot_len = htons(sizeof(packet.ip) + packet.tcp.doff * 4);
@@ -227,7 +248,7 @@ static void inject_tcp(struct connection *c, enum tcpr_verdict tcpr_verdict, str
 							  packet.tcp.doff * 4,
 							  0));
 
-	inject_ip(&packet.ip, oldskb, net_ns);
+	inject_ip(&packet.ip, oldskb, net_ns, direction);
 }
 
 static void inject_update(struct iphdr *ip, struct udphdr *udp, struct tcpr_ip4 *state, struct sk_buff *oldskb, struct net *net_ns)
@@ -251,7 +272,7 @@ static void inject_update(struct iphdr *ip, struct udphdr *udp, struct tcpr_ip4 
 	packet.udp.dest = udp->source;
 	packet.udp.len = htons(sizeof(packet.udp) + sizeof(packet.state));
 	memcpy(&packet.state, state, sizeof(packet.state));
-	inject_ip(&packet.ip, oldskb, net_ns);
+	inject_ip(&packet.ip, oldskb, net_ns, INPUT);
 }
 
 static unsigned int tcpr_tg_update(struct sk_buff *skb, uint32_t address, struct net *net_ns)
@@ -419,7 +440,7 @@ static unsigned int tcpr_tg_peer(struct sk_buff *skb, struct net *net_ns)
 	if (tcpr_verdict == TCPR_DELIVER) {
 		fix_checksums(ip, tcp, ip->daddr, c->state.address);
 		ip->daddr = c->state.address;
-		inject_ip(ip, skb, net_ns);
+		inject_ip(ip, skb, net_ns, INPUT);
 	} else if (tcpr_verdict != TCPR_DROP) {
 		inject_tcp(c, tcpr_verdict, skb, net_ns);
 	}
@@ -436,7 +457,6 @@ static unsigned int tcpr_tg(struct sk_buff *skb,
 			    const struct xt_action_param *par)
 {
 	const uint32_t *address = par->targinfo;
-	unsigned int res;
 	struct net *net_ns = dev_net(par->in ? par->in : par->out);
 
 	if (net_ratelimit())
@@ -444,11 +464,7 @@ static unsigned int tcpr_tg(struct sk_buff *skb,
 	if (!skb_make_writable(skb, skb->len))
 		return NF_DROP;
 	if (*address)
-	{
-		res = tcpr_tg_application(skb, *address, net_ns);
-		printk(KERN_DEBUG "tcpr application result: %i\n", res);
-		return res;
-	}
+		return tcpr_tg_application(skb, *address, net_ns);
 	else
 		return tcpr_tg_peer(skb, net_ns);
 }
